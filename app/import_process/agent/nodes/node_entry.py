@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import sys
 
-from RAG.app.utils.task_utils import add_done_task, add_running_task
+from app.utils.task_utils import add_done_task, add_running_task
 from app.core.logger import logger
 from app.import_process.agent.state import ImportGraphState
 

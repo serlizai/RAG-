@@ -55,7 +55,7 @@ def route_after_entry(state: ImportGraphState) -> str:
 
 # 条件边
 workflow.add_conditional_edges(
-    "node_entry",
+    "node_entry",  # 从入口节点开始，根据文件类型决定下一步
     route_after_entry,
     {
         "node_pdf_to_md": "node_pdf_to_md",

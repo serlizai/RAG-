@@ -23,7 +23,7 @@ class ImportGraphState(TypedDict):
 
     # --- 路径相关 ---
     local_dir: str        # 当前工作目录或输出目录
-    local_file_path: str  # 原始输入文件路径
+    local_file_path: str  # 原始输入文件路径，前端页面赋值，测试写死
     file_title: str       # 文件标题（文件名去后缀）
     pdf_path: str         # PDF 文件路径 (如果输入是PDF)
     md_path: str          # Markdown 文件路径 (转换后或直接输入的)

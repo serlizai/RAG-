@@ -2,6 +2,8 @@ from pathlib import Path
 from app.utils.path_util import PROJECT_ROOT
 from app.core.logger import logger  # 可选，加日志更友好
 
+# kwargs本质是字典：{'root_folder': 'xxx', 'image_content': ('a', 'b')}
+# 定义时 ** 是收集，调用时 ** 是展开，函数参数是收集成字典
 def load_prompt(name: str, **kwargs) -> str:
     """
     加载提示词并渲染变量占位符
@@ -21,7 +23,8 @@ def load_prompt(name: str, **kwargs) -> str:
 
     # 4. 核心：如果传了参数，渲染占位符；没传参，直接返回原文本
     if kwargs:
-        rendered_prompt = raw_prompt.format(**kwargs)
+        # 这里的**是展开成关键字参数
+        rendered_prompt = raw_prompt.format(**kwargs)  # 相当于f"xx{temp}xx"，填写占位符
         logger.debug(f"提示词渲染成功，替换变量：{list(kwargs.keys())}")
         return rendered_prompt
     return raw_prompt

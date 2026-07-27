@@ -26,9 +26,10 @@ def get_llm_client(model: Optional[str] = None, json_mode: bool = False) -> Chat
     :raise ValueError: 缺失API密钥/基础地址等核心配置
     :raise Exception: 模型初始化失败（LangChain封装层异常）
     """
+
     # 1. 确定目标模型（优先级递减，保证模型名非空）
     target_model = model or lm_config.llm_model or "qwen3-32b"
-    # 缓存键：模型名+JSON模式，唯一标识不同配置的客户端
+    # 缓存键：模型名+JSON模式，唯一标识不同配置的客户端，避免每次都要连模型
     cache_key = (target_model, json_mode)
 
     # 2. 缓存命中：直接返回已初始化的实例，避免重复创建
@@ -50,11 +51,13 @@ def get_llm_client(model: Optional[str] = None, json_mode: bool = False) -> Chat
     model_kwargs = {}
     if json_mode:
         # 开启JSON标准输出模式，强制模型返回可解析的json_object
-        model_kwargs["response_format"] = {"type": "json_object"}
+        model_kwargs["response_format"] = {"type": "json_object"}  # 没有这个key就会自动创建
         logger.debug(f"[LLM客户端] 已开启JSON输出模式，模型将返回标准JSON结构")
 
     # 5. 客户端初始化：捕获LangChain封装层异常，抛出更友好的提示
     try:
+        # 这里用ChatOpenAI而不是init_chat_model是因为这里不需要频繁更换厂商
+        # init_chat_model底层是对ChatOpenAI的封装，增加了厂商选择逻辑，复杂度高且不必要
         llm_client = ChatOpenAI(
             model=target_model,  # 目标模型名
             temperature=lm_config.llm_temperature or 0.1,  # 低温度保证输出确定性（0~1）

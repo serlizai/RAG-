@@ -26,6 +26,7 @@ def apply_api_rate_limit(
     # 2. 窗口内请求数达上限，计算并阻塞等待剩余时间
     if len(request_times) >= max_requests:
         # 计算需要等待的时长（窗口总时长 - 最早请求已存在的时长）
+        # 例如队列：70,80,120，新来的是125，等待时长 = 60 - (125 - 70) = 5秒
         sleep_duration = window_seconds - (current_time - request_times[0])
         if sleep_duration > 0:
             logger.debug(f"触发API速率限制，窗口{window_seconds}秒内最多{max_requests}次，需等待：{sleep_duration:.2f} 秒")

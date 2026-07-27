@@ -7,20 +7,21 @@ from minio import Minio
 from app.conf.minio_config import minio_config
 from app.core.logger import logger
 
-# 全局MinIO客户端对象，初始化后供全项目调用
+# 全局MinIO客户端对象，初始化后供全项目调用, 创建好了桶和设置好了访问权限
 minio_client = None
 
 try:
-    # 初始化MinIO客户端实例
+    # 1.初始化MinIO客户端实例，相当于登录minio
     minio_client = Minio(
-        endpoint=minio_config.endpoint,
-        access_key=minio_config.access_key,
-        secret_key=minio_config.secret_key,
+        endpoint=minio_config.endpoint,  # 端点 9000
+        access_key=minio_config.access_key,  # 账号
+        secret_key=minio_config.secret_key,  # 密码
         secure=False  # 内网/本地部署用HTTP，公网部署需改为True并配置SSL
     )
     bucket_name = minio_config.bucket_name
 
-    # 检查存储桶是否存在，不存在则自动创建
+    # 2.创建桶
+    # 检查存储桶是否存在，不存在则自动创建并设置访问权限
     if not minio_client.bucket_exists(bucket_name):
         logger.info(f"MinIO存储桶[{bucket_name}]不存在，开始创建")
         minio_client.make_bucket(bucket_name)

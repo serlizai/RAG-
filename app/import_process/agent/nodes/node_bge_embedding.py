@@ -87,7 +87,10 @@ def node_bge_embedding(state: ImportGraphState) -> ImportGraphState:
         add_done_task(state.get("task_id", ""), current_node)
     except Exception as e:
         # 捕获节点所有异常，记录错误堆栈，不中断整体流程
-        logger.error(f"BGE-M3向量化节点执行失败：{str(e)}", exc_info=True)
+        logger.error(f"{current_node}节点执行失败：{str(e)}", exc_info=True)
+    finally:
+        logger.info(f">>> [Stub] 完成节点: {current_node},当前状态为{state}")
+        add_done_task(state.get("task_id", ""), current_node)
 
     # 返回更新后的状态对象，传递至下游节点
     return state

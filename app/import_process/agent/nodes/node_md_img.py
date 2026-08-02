@@ -95,8 +95,11 @@ def step_1_get_content(state: ImportGraphState) -> Tuple[str, Path, Path]:
         raise FileNotFoundError(f"md文件不存在: {md_file_path}")
     
     # 读取md_content
-    if not state.get("md_content"):
-        # 没有再读取，有就代表是从pdf解析过来的，已经赋值了
+    if state.get("md_content"):
+        # 已存在（如从PDF转换节点赋值），直接使用
+        md_content = state["md_content"]
+    else:
+        # 不存在则从文件读取
         with open(md_path_obj, "r", encoding="utf-8") as f:
             md_content = f.read()
         state["md_content"] = md_content

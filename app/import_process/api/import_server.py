@@ -19,7 +19,7 @@ from app.utils.task_utils import (
     get_done_task_list,
     get_running_task_list,
     update_task_status,
-    get_task_status,
+    get_task_status, TASK_STATUS_PROCESSING, TASK_STATUS_COMPLETED, TASK_STATUS_FAILED,
 )
 from app.import_process.agent.state import get_default_state
 from app.import_process.agent.main_graph import kb_import_app  # LangGraph全流程编译实例
@@ -65,7 +65,7 @@ def run_import_graph(task_id, local_file_path, local_dir):
     try:
         # key:task_id, value: 任务状态
         # add_running和add_done是针对任务中每个节点的状态，update_task_status是针对整个任务的状态
-        update_task_status(task_id, "processing")
+        update_task_status(task_id, TASK_STATUS_PROCESSING)
 
         init_state = get_default_state()
         init_state["task_id"] = task_id
@@ -78,11 +78,11 @@ def run_import_graph(task_id, local_file_path, local_dir):
             for node_name, result in even.items():
                 logger.info(f"节点{node_name}完成，执行结果：{result}")
 
-        update_task_status(task_id, "completed")
+        update_task_status(task_id, TASK_STATUS_COMPLETED)
         logger.info(f"任务{task_id}图执行完成")
     except Exception as e:
         logger.exception("==============图执行失败发生异常==============")
-        update_task_status(task_id, "failed")
+        update_task_status(task_id, TASK_STATUS_FAILED)
 
 
 # 8080/upload post -> 文件上传+开启导入流程

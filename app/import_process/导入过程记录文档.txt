@@ -10,3 +10,887 @@
 # 定义静态边
 # 编译图节点对象
 4.跑通节点和图关系
+
+
+中间总结：
+我继续完成这次全仓分析，并以你刚标注的 `app/import_process/agent/state.py` 为主线：它是入库工作流各节点共享的数据总线。已确认前半段流程，接下来补齐 Milvus 入库、查询链路、前端/API 契约和实际产物格式，再给你一份完整结论。
+
+目前一个关键结论已经很清楚：入库链路大部分是真实实现；查询链路目前主要还是骨架。查询图里“商品确认、普通检索、HyDE、联网搜索、RRF、Rerank”多数只是 `sleep + 空列表/占位值`，最终答案也是测试文本。更重要的是，当前 `query_server.py` 只有 FastAPI 初始化，没有任何路由，因此聊天页虽然写好了接口调用，但后端契约尚未接通。我会再用现有产物和测试验证这一判断。
+
+为了把两条工作流和状态字段的变化讲清楚，我会使用可视化说明能力来组织数据流图；它只影响最终呈现方式，不会修改仓库。图里会明确区分“已经真实执行的入库链路”和“目前仍是占位骨架的查询链路”。
+
+结论先说：这个项目目前更准确地说是“知识库入库系统已基本跑通，RAG 查询系统仍处于原型阶段”。
+
+- 入库链路已经实现：PDF/Markdown 上传、PDF 转 Markdown、图片理解与 MinIO 存储、文档分块、产品名识别、BGE-M3 双向量生成、Milvus 入库、任务进度查询。
+- 查询链路只有 LangGraph 结构、聊天页面、SSE/历史记录工具；真实向量检索、HyDE、联网搜索、RRF、Rerank 和答案生成都还是占位实现。
+- 当前工作区里的 [query_server.py](/Users/lwj/AI_project/RAG/app/query_process/api/query_server.py:20) 只有 31 行 FastAPI 初始化代码，没有任何业务路由，所以聊天页面暂时无法真正使用。
+- 以下分析以当前未提交工作区为准。
+
+## 1. 当前功能完成度
+
+| 功能 | 状态 | 实现方式 |
+|---|---|---|
+| PDF/MD 上传 | 已实现 | FastAPI `UploadFile`，保存到 `output/日期/task_id/` |
+| 导入进度展示 | 已实现 | 内存任务字典 + 前端每 2 秒轮询 |
+| PDF 转 Markdown | 已实现 | 调用 MinerU API，上传 PDF、轮询、下载并解压 ZIP |
+| Markdown 图片处理 | 已实现 | 视觉模型生成图片摘要，上传 MinIO，替换 Markdown 图片链接 |
+| 文档分块 | 已实现但有逻辑错误 | Markdown 标题切分，超长块二次切分，短块合并 |
+| 产品/主体识别 | 已实现 | LLM 根据文件名和前几个 Chunk 提取产品名称 |
+| 文本向量化 | 已实现 | 本地 BGE-M3 生成 Dense + Sparse 双向量 |
+| Milvus 入库 | 已实现 | 两个 Collection：产品名集合、文档 Chunk 集合 |
+| 查询流程编排 | 只有骨架 | LangGraph 已串联多路召回、RRF、Rerank、回答节点 |
+| 真实向量检索 | 未实现 | 节点目前返回空列表 |
+| HyDE 检索 | 未实现 | 只有提示词和占位节点 |
+| 联网搜索/MCP | 未实现 | 配置存在，节点返回空列表 |
+| RRF/Reranker | 未实现 | 工具类存在，但图节点没有排序逻辑 |
+| 最终 RAG 回答 | 未实现 | 目前返回固定测试文本 |
+| 查询 API | 未实现 | `query_server.py` 没有路由 |
+| Mongo 历史对话 | 工具已写、未接通 | 查询 API 没调用 |
+| Neo4j 知识图谱 | 未实现 | 只有客户端辅助文件，且依赖未安装 |
+
+## 2. 整体架构和数据流
+
+```mermaid
+flowchart TB
+    File["PDF / Markdown 文件"] --> Upload["POST /upload<br/>multipart/form-data"]
+    Upload --> Local["output/YYYYMMDD/task_id/原文件"]
+    Upload --> BG["FastAPI BackgroundTasks"]
+    BG --> State["ImportGraphState<br/>内存中的 Python dict"]
+
+    State --> Entry{"node_entry<br/>识别文件类型"}
+    Entry -->|PDF| MinerU["MinerU API<br/>PDF → ZIP → Markdown"]
+    Entry -->|Markdown| Image
+    MinerU --> Image["node_md_img<br/>视觉模型摘要 + MinIO 图片 URL"]
+    Image --> Split["node_document_split<br/>标题分块 + 长块二次切分"]
+    Split --> Name["node_item_name_recognition<br/>识别产品名称"]
+    Name --> ItemDB["Milvus: kb_item_names"]
+    Name --> Embedding["node_bge_embedding<br/>Dense[1024] + Sparse"]
+    Embedding --> ChunkDB["Milvus: kb_chunks"]
+    ChunkDB --> Progress["任务状态 completed<br/>GET /status/task_id"]
+
+    Chat["chat.html"] --> QueryAPI["query_server.py<br/>当前没有业务路由"]
+    QueryAPI -.设计目标.-> QueryState["QueryGraphState"]
+    QueryState -.占位实现.-> QueryFlow["商品确认 → 3 路召回<br/>→ RRF → Rerank → 回答"]
+```
+
+核心编排位于 [入库 main_graph.py](/Users/lwj/AI_project/RAG/app/import_process/agent/main_graph.py:23)，执行顺序是：
+
+```text
+node_entry
+  ├─ PDF → node_pdf_to_md
+  └─ MD ───────────────────┐
+                           ↓
+node_md_img
+→ node_document_split
+→ node_item_name_recognition
+→ node_bge_embedding
+→ node_import_milvus
+→ END
+```
+
+## 3. `ImportGraphState` 的作用
+
+你标记的 [state.py](/Users/lwj/AI_project/RAG/app/import_process/agent/state.py:5) 是整个入库流程的数据总线。
+
+它虽然叫 `TypedDict`，但运行时仍然只是普通 Python 字典，不提供 Pydantic 那样的运行时校验。LangGraph 把它依次交给每个节点，节点修改字段后传给下一个节点。
+
+主要字段可以分为：
+
+- 任务标识：`task_id`
+- 路由字段：`is_pdf_read_enabled`、`is_md_read_enabled`
+- 文件路径：`local_file_path`、`local_dir`、`pdf_path`、`md_path`、`file_title`
+- 文档数据：`md_content`、`chunks`
+- 业务实体：`item_name`
+- 预留字段：各种切分开关、`split_path`、`embeddings_path`、`embeddings_content`
+
+其中这些字段目前只是声明了，但没有参与真实逻辑：
+
+```text
+is_normal_split_enabled
+is_silicon_flow_api_enabled
+is_advanced_split_enabled
+is_vllm_enabled
+split_path
+embeddings_path
+embeddings_content
+```
+
+实际向量直接写进了 `state["chunks"]`，没有使用 `embeddings_content`。
+`create_default_state()` 和 `get_default_state()` 都使用深拷贝，避免多个任务共享同一个 `chunks` 列表，这一点是正确的。
+## 4. 入库数据每一步如何变化
+
+### 4.1 上传后
+
+[import_server.py](/Users/lwj/AI_project/RAG/app/import_process/api/import_server.py:93) 接收：
+
+```http
+POST /upload
+Content-Type: multipart/form-data
+
+files=<一个或多个 PDF/MD>
+```
+
+响应：
+
+```json
+{
+  "code": 200,
+  "message": "文件上传完成, 文件数量: 1",
+  "task_ids": ["5b751c68-..."]
+}
+```
+
+初始状态大致为：
+
+```python
+{
+    "task_id": "UUID",
+    "local_file_path": "/.../output/20260803/UUID/manual.pdf",
+    "local_dir": "/.../output/20260803/UUID",
+    "is_pdf_read_enabled": False,
+    "is_md_read_enabled": False,
+    "md_content": "",
+    "chunks": [],
+    "item_name": ""
+}
+```
+
+### 4.2 文件入口
+
+[node_entry.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_entry.py:10) 根据后缀设置：
+
+```python
+{
+    "is_pdf_read_enabled": True,
+    "pdf_path": "/.../manual.pdf",
+    "file_title": "manual"
+}
+```
+
+后缀判断目前区分大小写，只识别小写 `.pdf` 和 `.md`。
+
+### 4.3 PDF 转 Markdown
+
+[node_pdf_to_md.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_pdf_to_md.py:80)：
+
+1. 向 MinerU 请求文件上传地址。
+2. 使用预签名 URL 上传 PDF。
+3. 每 3 秒轮询一次解析状态，最多等待 10 分钟。
+4. 下载解析结果 ZIP。
+5. 解压出 Markdown、图片及 MinerU JSON。
+6. 将 Markdown 全文读入状态。
+
+状态新增：
+
+```python
+{
+    "md_path": "/.../manual/manual.md",
+    "md_content": "# 标题\n正文..."
+}
+```
+
+### 4.4 图片处理
+
+[node_md_img.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_md_img.py:316)：
+
+1. 扫描 Markdown 同级的 `images/` 文件夹。
+2. 找出 Markdown 实际引用的图片。
+3. 截取图片前后各约 100 个字符。
+4. 图片转 Base64，连同上下文发送给视觉模型。
+5. 每分钟最多调用 9 次。
+6. 将图片上传 MinIO。
+7. 将 Markdown 原引用替换为：
+
+```markdown
+![视觉模型生成的图片摘要](http://minio/bucket/upload-images/文件名/图片.jpg)
+```
+
+8. 保存为 `原文件名_new.md`。
+
+实际生成结果可见 [hak180产品安全手册_new.md](/Users/lwj/AI_project/RAG/output/20260803/5b751c68-8c12-46cb-9a16-69dd8cd32759/hak180产品安全手册/hak180产品安全手册_new.md)。
+
+### 4.5 文档分块
+
+[node_document_split.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_document_split.py:326) 的设计是：
+
+- 按 Markdown `#` 到 `######` 标题切分。
+- 忽略代码块中的 `#`。
+- 没有标题时整篇作为“无标题”块。
+- 超过 2000 字符时用 `RecursiveCharacterTextSplitter` 二次切分。
+- 二次切分重叠 100 字符。
+- 目标是合并小于 500 字符的相邻短块。
+- 将分块备份到 `chunks.json`。
+
+初始 Chunk 形式：
+
+```json
+{
+  "title": "## 设备",
+  "content": "## 设备\n具体正文……",
+  "file_title": "hak180产品安全手册",
+  "parent_title": "## 设备",
+  "part": 1
+}
+```
+
+现有样例 [chunks.json](/Users/lwj/AI_project/RAG/output/20260803/5b751c68-8c12-46cb-9a16-69dd8cd32759/chunks.json) 有 14 个 Chunk。
+
+注意：这个 JSON 在向量生成之前保存，所以里面没有 `item_name`、向量和 `chunk_id`；最终完整数据只存在内存状态和 Milvus 中。
+
+### 4.6 产品名称识别
+
+[node_item_name_recognition.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_item_name_recognition.py:304)：
+
+- 最多取前 5 个 Chunk。
+- 单块最多取 800 字符。
+- 总上下文不超过 2500 字符。
+- 调用文本大模型提取品牌、型号和产品名称。
+- 调用失败时用 `file_title` 兜底。
+- 将结果写入 State 以及每一个 Chunk。
+
+例如：
+
+```python
+state["item_name"] = "BrotherHAK180烫金机"
+
+chunk["item_name"] = "BrotherHAK180烫金机"
+```
+
+同时为产品名生成一组 BGE-M3 双向量，存入 `kb_item_names`。
+
+### 4.7 向量生成
+
+[node_bge_embedding.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_bge_embedding.py:19) 每次处理 5 个 Chunk，实际送入模型的文本是：
+
+```text
+主体：BrotherHAK180烫金机，内容：Chunk正文……
+```
+
+输出：
+
+```python
+{
+    "dense": [
+        [0.013, -0.027, ...]       # 1024 个浮点数
+    ],
+    "sparse": [
+        {
+            1173: 0.1699,
+            3895: 0.2170,
+            33831: 0.2685
+        }
+    ]
+}
+```
+
+- Dense：`list[float]`，维度为 1024。
+- Sparse：`dict[int, float]`，键是词表维度，值是权重。
+- 序列化成 JSON 后，Sparse 的整数键会变成字符串键。
+
+最终 Chunk 形式：
+
+```python
+{
+    "chunk_id": 468027378355146793,
+    "title": "## 设备",
+    "parent_title": "## 设备",
+    "part": 1,
+    "file_title": "hak180产品安全手册",
+    "item_name": "BrotherHAK180烫金机",
+    "content": "……",
+    "dense_vector": [1024个浮点数],
+    "sparse_vector": {维度索引: 权重}
+}
+```
+
+### 4.8 Milvus 存储
+
+系统创建两个 Collection。
+`kb_item_names`：
+```text
+pk               INT64，自增主键
+file_title       VARCHAR
+item_name        VARCHAR
+dense_vector     FLOAT_VECTOR(1024)
+sparse_vector    SPARSE_FLOAT_VECTOR
+```
+`kb_chunks`：
+
+```text
+chunk_id         INT64，自增主键
+content          VARCHAR
+title            VARCHAR
+parent_title     VARCHAR
+part             INT8
+file_title       VARCHAR
+item_name        VARCHAR
+dense_vector     FLOAT_VECTOR(1024)
+sparse_vector    SPARSE_FLOAT_VECTOR
+```
+
+Dense 使用 HNSW + COSINE；Sparse 使用倒排索引 + IP。
+
+日志表明项目确实成功跑过一次完整入库：识别出 `BrotherHAK180烫金机`，并向 Milvus 插入 14 个 Chunk。
+
+## 5. 查询链路现在是什么状态
+
+查询状态定义在 [query state.py](/Users/lwj/AI_project/RAG/app/query_process/agent/state.py:8)，设计字段包括：
+
+```python
+{
+    "session_id": "",
+    "original_query": "",
+    "item_names": [],
+    "rewritten_query": "",
+    "history": [],
+    "embedding_chunks": [],
+    "hyde_embedding_chunks": [],
+    "kg_chunks": [],
+    "web_search_docs": [],
+    "rrf_chunks": [],
+    "reranked_docs": [],
+    "prompt": "",
+    "answer": "",
+    "is_stream": False
+}
+```
+
+[查询 main_graph.py](/Users/lwj/AI_project/RAG/app/query_process/agent/main_graph.py:14) 设计为：
+
+```text
+商品名称确认
+  ├─ 普通向量检索 ─────┐
+  ├─ HyDE 向量检索 ────┼→ RRF → Rerank → 答案
+  └─ MCP 联网搜索 ─────┘
+```
+
+但当前真实行为是：
+
+- 商品确认固定返回 `["示例商品"]`。
+- 普通检索返回 `[]`。
+- HyDE 返回 `[]`。
+- Web 搜索返回 `[]`。
+- RRF 和 Rerank 没有更新任何状态。
+- 答案固定返回：
+
+```text
+这是关于[用户原问题]的测试回答，流式输出
+```
+
+我实际运行了当前查询图，它能够完整执行，但得到的正是上述占位答案，不会访问 Milvus、LLM、Reranker 或网络。
+
+另外，虽然这些查询侧工具已经写好，但目前均未被查询节点调用：
+
+- Milvus Dense/Sparse 混合检索辅助函数
+- `FlagReranker`
+- MongoDB 对话历史
+- HyDE、查询重写、答案 Prompt
+- MCP 配置
+- Neo4j 客户端
+
+## 6. 查询页面期待的数据协议
+
+[chat.html](/Users/lwj/AI_project/RAG/app/query_process/page/chat.html:687) 已经实现了完整前端交互，期望后端提供：
+
+```text
+GET    /health
+GET    /chat.html
+POST   /query
+GET    /stream/{session_id}
+GET    /history/{session_id}
+DELETE /history/{session_id}
+```
+
+提问请求形式：
+
+```json
+{
+  "query": "HAK180 如何安全搬运？",
+  "session_id": "sess-xxxx",
+  "is_stream": true
+}
+```
+
+SSE 数据使用标准格式：
+
+```text
+event: progress
+data: {"status":"processing","done_list":[],"running_list":["切片搜索"]}
+
+event: delta
+data: {"delta":"这"}
+
+event: final
+data: {"answer":"完整答案","status":"completed","image_urls":[]}
+```
+
+[SSE 工具](/Users/lwj/AI_project/RAG/app/utils/sse_utils.py:8) 已支持：
+
+```text
+ready
+progress
+delta
+final
+error
+__close__
+```
+
+但因为 `query_server.py` 没有 `/query` 和 `/stream` 路由，这套前端与 SSE 工具目前没有真正连接起来。
+
+MongoDB 计划存储的对话形式是：
+
+```json
+{
+  "_id": "ObjectId",
+  "session_id": "sess-xxx",
+  "role": "user或assistant",
+  "text": "消息内容",
+  "rewritten_query": "改写后的问题",
+  "item_names": ["产品名称"],
+  "image_urls": ["图片地址"],
+  "ts": 1787xxxxxx.x
+}
+```
+
+## 7. 数据最终存在哪里
+
+| 位置 | 数据 |
+|---|---|
+| 内存 `ImportGraphState` | 当前导入任务的完整中间状态 |
+| 内存任务字典 | `processing/completed/failed`、运行中节点、完成节点 |
+| 本地 `output/` | 原 PDF、MinerU ZIP、Markdown、图片、解析 JSON、`chunks.json` |
+| MinIO | 文档图片 |
+| Milvus `kb_item_names` | 产品名称及双向量 |
+| Milvus `kb_chunks` | 完整 Chunk、元数据及双向量 |
+| MongoDB `chat_message` | 计划中的对话历史，目前 API 未接通 |
+| Neo4j | 当前没有实际数据写入 |
+
+LangGraph 没有配置 Checkpointer，所以图状态本身不会持久化；服务重启后只保
+
+结论先说：当前项目是一个“面向产品/设备手册的 RAG 知识库”。知识入库链路已经基本实现并有成功运行记录；查询链路目前主要是架构骨架、前端页面和 SSE 基础设施，尚未真正接入 Milvus 检索、HyDE、联网搜索、RRF、Rerank 和大模型回答。
+
+以下结论以当前工作区代码为准。当前 [query_server.py](/Users/lwj/AI_project/RAG/app/query_process/api/query_server.py:1) 只有 31 行，且处于未提交开发状态，没有任何业务路由。
+
+## 一、当前完成了什么
+
+| 功能 | 当前状态 | 实现方式 |
+|---|---|---|
+| PDF/Markdown 上传 | 已实现 | FastAPI multipart 上传，多文件生成独立 UUID 任务 |
+| 异步入库及进度查询 | 已实现 | FastAPI `BackgroundTasks` + 进程内任务字典 + 前端轮询 |
+| PDF 转 Markdown | 已实现 | 调用 MinerU API，上传 PDF、轮询、下载 ZIP、解压 Markdown |
+| Markdown 图片处理 | 已实现 | 视觉模型总结图片、上传 MinIO、替换 Markdown 图片链接 |
+| 文档切片 | 已实现但有逻辑缺陷 | Markdown 标题切分 + 2000 字二次切分 + 100 字重叠 |
+| 商品/设备名称识别 | 已实现 | LLM 根据文件名和前 5 个切片提取 `item_name` |
+| BGE-M3 双向量生成 | 已实现 | 本地模型生成 1024 维 Dense 和 Sparse 向量 |
+| Milvus 入库 | 已实现 | `kb_item_names`、`kb_chunks` 两个集合 |
+| 查询工作流图 | 只有骨架 | LangGraph 节点和并行关系已搭好，但节点返回空数据 |
+| 查询 FastAPI 服务 | 未完成 | 当前没有 `/query`、`/stream`、`/history`、`/health` 等接口 |
+| MongoDB 对话历史工具 | 工具已写但未接通 | 可新增、查询、更新、删除聊天记录 |
+| SSE 流式输出 | 工具已写但未接通 API | 支持 `progress/delta/final/error` 事件 |
+| Neo4j 知识图谱 | 未实现 | 只有客户端壳和状态字段，且 `neo4j` 依赖未安装 |
+
+入库图定义在 [main_graph.py](/Users/lwj/AI_project/RAG/app/import_process/agent/main_graph.py:23)，核心状态定义在你标注的 [state.py](/Users/lwj/AI_project/RAG/app/import_process/agent/state.py:5)。
+
+```mermaid
+flowchart TB
+    F["PDF / Markdown 文件"] --> U["POST /upload<br/>multipart/form-data"]
+    U --> L["保存到 output/日期/task_id/"]
+    U --> B["FastAPI BackgroundTasks"]
+    B --> S["ImportGraphState<br/>内存中的 Python dict"]
+    S --> E{"node_entry<br/>按扩展名判断"}
+
+    E -->|PDF| P["MinerU<br/>PDF → ZIP → Markdown"]
+    E -->|Markdown| I
+    P --> I["图片处理<br/>视觉模型摘要 + MinIO URL"]
+    I --> C["Markdown 切片<br/>标题切分 + 长文本二次切分"]
+    C --> N["LLM 识别 item_name"]
+    N --> IN["Milvus: kb_item_names"]
+    N --> V["BGE-M3 双向量<br/>Dense[1024] + Sparse"]
+    V --> CH["Milvus: kb_chunks"]
+    CH --> DONE["任务状态 completed<br/>前端轮询 /status"]
+
+    Q["chat.html"] --> QS["query_server.py<br/>当前没有业务路由"]
+    QS -. "设计目标" .-> QG["QueryGraphState"]
+    QG -.-> PIPE["商品确认 → 三路召回<br/>→ RRF → Rerank → 回答"]
+```
+
+## 二、`ImportGraphState` 是怎样工作的
+`ImportGraphState` 虽然写成 `TypedDict`，但运行时本质上仍是普通 Python 字典，不具备 Pydantic 那样的运行时校验。
+
+`create_default_state()` 和 `get_default_state()` 使用深拷贝，是为了避免不同任务共享同一个 `chunks` 列表。
+字段可以分成几类：
+
+- 任务标识：`task_id`
+- 路由标志：`is_pdf_read_enabled`、`is_md_read_enabled`
+- 输入输出路径：`local_file_path`、`local_dir`、`pdf_path`、`md_path`、`file_title`
+- 核心内容：`md_content`、`chunks`、`item_name`
+- 预留但未使用：`split_path`、`embeddings_path`、`embeddings_content`
+- 尚未接通的切片策略：`is_normal_split_enabled`、`is_silicon_flow_api_enabled`、`is_advanced_split_enabled`、`is_vllm_enabled`
+
+也就是说，虽然状态中设计了四种切片模式，目前代码始终使用同一套普通 Markdown 切片逻辑，这些开关不会改变工作流。
+
+入库任务刚开始时大致是：
+
+```python
+{
+    "task_id": "UUID",
+    "local_file_path": "/.../manual.pdf",
+    "local_dir": "/.../output/20260803/UUID",
+    "is_pdf_read_enabled": False,
+    "is_md_read_enabled": False,
+    "pdf_path": "",
+    "md_path": "",
+    "md_content": "",
+    "chunks": [],
+    "item_name": ""
+}
+```
+
+LangGraph 每执行一个节点，就修改这个状态，再交给下一个节点。入库节点主要采用“原地修改字典并返回完整状态”的方式。
+
+## 三、入库数据如何流动
+
+### 1. 上传文件
+
+[import_server.py](/Users/lwj/AI_project/RAG/app/import_process/api/import_server.py:93) 接收：
+
+```text
+Content-Type: multipart/form-data
+files: PDF 或 Markdown 文件，可重复出现
+```
+
+每个文件保存为：
+
+```text
+output/YYYYMMDD/{task_id}/{原始文件名}
+```
+
+响应格式：
+
+```json
+{
+  "code": 200,
+  "message": "文件上传完成, 文件数量: 1",
+  "task_ids": ["5b751c68-..."]
+}
+```
+
+前端每两秒请求：
+
+```http
+GET /status/{task_id}
+```
+
+返回：
+
+```json
+{
+  "code": 200,
+  "task_id": "...",
+  "status": "processing",
+  "done_list": ["开始上传文件", "检查文件"],
+  "running_list": ["PDF转Markdown"]
+}
+```
+
+### 2. 识别文件类型
+`node_entry` 根据文件后缀设置：
+```python
+{
+    "is_pdf_read_enabled": True,
+    "pdf_path": "/.../manual.pdf",
+    "file_title": "manual"
+}
+```
+
+只识别小写 `.pdf` 和 `.md`。
+
+### 3. PDF 转 Markdown
+
+[node_pdf_to_md.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_pdf_to_md.py:80) 的流程是：
+
+1. 向 MinerU 申请预签名上传 URL。
+2. PUT 上传 PDF 原始字节。
+3. 每 3 秒轮询一次，最长等待 10 分钟。
+4. 下载 MinerU 返回的 ZIP。
+5. 解压并选择“原文件名.md”“full.md”或第一个 Markdown。
+6. 将 Markdown 全文读入 `state["md_content"]`。
+
+中间产物包括 PDF、ZIP、Markdown、图片、布局 JSON、MinerU 内容 JSON 等。
+
+### 4. 图片处理
+
+[node_md_img.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_md_img.py:316)：
+
+1. 查找 Markdown 同目录下的 `images/`。
+2. 只处理 Markdown 中实际引用过的图片。
+3. 截取图片前后各 100 个字符作为上下文。
+4. 图片转 Base64，与上下文一起发送给视觉模型。
+5. 视觉模型生成不超过 50 字的中文说明。
+6. 上传图片到 MinIO。
+7. 把原引用替换为：
+
+```markdown
+![视觉模型生成的图片说明](http://minio/bucket/upload-images/文档名/图片.jpg)
+```
+
+8. 保存成 `{原文件名}_new.md`。
+
+实际产物可见 [hak180产品安全手册_new.md](/Users/lwj/AI_project/RAG/output/20260803/5b751c68-8c12-46cb-9a16-69dd8cd32759/hak180产品安全手册/hak180产品安全手册_new.md)。
+
+### 5. Markdown 切片
+
+[node_document_split.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_document_split.py:326)：
+
+- 先按 `#` 到 `######` 标题切分。
+- fenced code block 中的 `#` 不作为标题。
+- 大于 2000 字的块用 `RecursiveCharacterTextSplitter` 再切。
+- 二次切分重叠 100 字。
+- 原设计会合并小于 500 字且同属一个父标题的块。
+- 结果先备份到 `chunks.json`。
+
+基础切片格式：
+
+```json
+{
+  "title": "## 设备",
+  "content": "该标题下的 Markdown 内容……",
+  "file_title": "hak180产品安全手册",
+  "parent_title": "## 设备",
+  "part": 1
+}
+```
+
+现有样例 [chunks.json](/Users/lwj/AI_project/RAG/output/20260803/5b751c68-8c12-46cb-9a16-69dd8cd32759/chunks.json) 有 14 个切片。
+
+注意：这个文件是在商品识别和向量生成之前备份的，所以里面没有 `item_name`、向量和 `chunk_id`；这些字段只存在于后续内存状态和 Milvus 中。
+
+### 6. 识别主体名称
+
+[node_item_name_recognition.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_item_name_recognition.py:304)：
+
+- 取前 5 个切片。
+- 每块最多取 800 字。
+- 总上下文最多 2500 字。
+- 将文件名和切片内容传给 LLM。
+- 识别失败时使用 `file_title` 兜底。
+- 把结果同时写入 `state["item_name"]` 和每个 chunk。
+
+日志中已经成功识别过：
+
+```text
+BrotherHAK180烫金机
+```
+
+随后单独为商品名生成双向量，并写入 `kb_item_names`。
+
+### 7. BGE-M3 向量化
+
+[node_bge_embedding.py](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_bge_embedding.py:19) 每 5 个切片一批，把文本拼成：
+
+```text
+主体：BrotherHAK180烫金机，内容：切片正文……
+```
+
+生成：
+
+```python
+{
+    "dense": [[float, float, ...]],       # 每条 1024 维
+    "sparse": [{token_index: weight, ...}]
+}
+```
+
+最终 chunk 形式为：
+
+```python
+{
+    "chunk_id": 468027378355146793,
+    "title": "## 设备",
+    "parent_title": "## 设备",
+    "part": 1,
+    "file_title": "hak180产品安全手册",
+    "item_name": "BrotherHAK180烫金机",
+    "content": "...",
+    "dense_vector": [0.01, -0.03, ...],   # 1024 个浮点数
+    "sparse_vector": {4: 0.0128, 1173: 0.1699, ...}
+}
+```
+
+如果序列化成 JSON，稀疏向量的整数键会变成字符串键。
+
+### 8. Milvus 入库
+
+项目创建两个集合：
+
+- `kb_item_names`：商品名称级检索。
+- `kb_chunks`：正文切片检索。
+`kb_chunks` 字段包括：
+
+```text
+chunk_id       INT64 自动主键
+content        VARCHAR
+title          VARCHAR
+parent_title   VARCHAR
+part           INT8
+file_title     VARCHAR
+item_name      VARCHAR
+dense_vector   FLOAT_VECTOR(1024)
+sparse_vector  SPARSE_FLOAT_VECTOR
+```
+
+索引：
+
+- Dense：HNSW + COSINE。
+- Sparse：SPARSE_INVERTED_INDEX + IP。
+- 稀疏检索算法：DAAT_MAXSCORE。
+
+日志显示该链路曾成功识别商品并向 Milvus 插入 14 个切片。
+
+## 四、查询链路目前是什么状态
+
+查询状态定义在 [query state.py](/Users/lwj/AI_project/RAG/app/query_process/agent/state.py:8)，设计的数据包括：
+
+```python
+{
+    "session_id": "...",
+    "original_query": "...",
+    "item_names": [],
+    "rewritten_query": "",
+    "history": [],
+    "embedding_chunks": [],
+    "hyde_embedding_chunks": [],
+    "kg_chunks": [],
+    "web_search_docs": [],
+    "rrf_chunks": [],
+    "reranked_docs": [],
+    "prompt": "",
+    "answer": "",
+    "is_stream": False
+}
+```
+
+[查询图](/Users/lwj/AI_project/RAG/app/query_process/agent/main_graph.py:14) 设计为：
+
+```text
+商品确认
+   ├── 普通向量检索 ──┐
+   ├── HyDE 检索 ─────┼→ RRF → Rerank → 答案生成
+   └── MCP 联网搜索 ──┘
+```
+
+但目前实际行为是：
+
+- 商品确认固定返回 `["示例商品"]`。
+- 普通向量检索返回空列表。
+- HyDE 返回空列表。
+- MCP 搜索返回空列表。
+- RRF、Rerank 没有排序实现。
+- 最终返回固定测试答案。
+- 流式模式会逐字符发送，并附带两个 `example.com` 测试图片。
+
+我实际运行了查询图，当前结果是：
+
+```python
+{
+    "item_names": ["示例商品"],
+    "embedding_chunks": [],
+    "hyde_embedding_chunks": [],
+    "web_search_docs": [],
+    "answer": "这是关于[测试]的测试回答，流式输出"
+}
+```
+
+虽然 [chat.html](/Users/lwj/AI_project/RAG/app/query_process/page/chat.html:687) 已经完整实现了聊天 UI、历史渲染、流式开关、进度和图片展示，但它期望的接口都不存在：
+
+```text
+GET    /health
+POST   /query
+GET    /stream/{session_id}
+GET    /history/{session_id}
+DELETE /history/{session_id}
+```
+
+因此当前聊天页不能与后端正常交互。
+
+## 五、SSE 与聊天记录的数据形式
+
+SSE 基础设施在 [sse_utils.py](/Users/lwj/AI_project/RAG/app/utils/sse_utils.py:8)，每个 `session_id` 对应一个内存 `queue.Queue`。
+
+传输格式例如：
+
+```text
+event: progress
+data: {"status":"processing","done_list":["确认问题产品"],"running_list":["切片搜索"]}
+
+event: delta
+data: {"delta":"这"}
+
+event: final
+data: {"answer":"这是完整答案","status":"completed","image_urls":[]}
+```
+
+支持事件：
+
+```text
+ready / progress / delta / final / error
+```
+
+MongoDB 聊天记录设计为：
+
+```json
+{
+  "_id": "ObjectId",
+  "session_id": "sess-xxx",
+  "role": "user 或 assistant",
+  "text": "消息正文",
+  "rewritten_query": "",
+  "item_names": ["商品名称"],
+  "image_urls": ["http://.../image.jpg"],
+  "ts": 1787472000.123
+}
+```
+
+但这些 MongoDB 方法目前没有被任何实际 API 调用。
+
+## 六、数据最终存在哪里
+
+| 位置 | 数据 |
+|---|---|
+| 进程内存 | LangGraph State、任务状态、节点进度、SSE 队列 |
+| 本地 `output/` | 原文件、MinerU ZIP、Markdown、图片、解析 JSON、`chunks.json` |
+| MinIO | Markdown 中引用的图片 |
+| Milvus `kb_item_names` | 商品名称及其 Dense/Sparse 向量 |
+| Milvus `kb_chunks` | 最终切片、元数据和双向量 |
+| MongoDB `chat_message` | 计划存储对话历史，目前未接通 |
+| Neo4j | 当前没有实际数据写入 |
+
+项目没有配置 LangGraph checkpointer，所以图状态本身不会持久化；服务重启后，任务进度和 SSE 队列都会丢失。
+
+## 七、当前最重要的问题
+
+1. `query_server.py` 没有业务接口，完整查询服务尚未形成。
+
+2. 查询图所有核心 RAG 节点仍是占位实现，已经写好的 Milvus 混合检索、Reranker、查询提示词都没有被调用。
+
+3. 切片合并存在明确 bug：[node_document_split.py:223](/Users/lwj/AI_project/RAG/app/import_process/agent/nodes/node_document_split.py:223) 在不能合并时追加的是当前 `section`，而不是前一个 `pre_section`。现有样例已经出现最后一个切片重复两次，也可能丢失第一个前导块。
+
+4. Milvus 重新导入时按 `item_name` 删除旧数据。同一个产品如果有“安全手册”和“使用说明书”两份文档，后导入的可能删除前一份的全部切片。
+
+5. `.env` 中 `EMBEDDING_DIM=1536`，代码和 BGE-M3 实际使用 1024 维；环境配置目前没有生效。Reranker 路径还指向了 BGE-M3，而不是 reranker 模型。
+
+6. 图片目录不存在时，`node_md_img` 直接返回，没有把节点从运行中移到已完成，前端进度可能一直显示“Markdown 图片处理中”。
+
+7. MongoDB 的 `get_recent_messages()` 使用“时间升序后 limit”，实际拿到的是最早 N 条，不是最近 N 条。
+
+8. 任务状态和 SSE 都只存在单进程内存中，不支持多 worker、服务重启、任务恢复，也没有自动清理机制。
+
+9. 上传文件名和 MinerU ZIP 解压路径缺少安全处理；同时没有认证、文件大小限制，MinIO 桶还被设置为匿名可读，不适合直接暴露到生产环境。
+
+10. 测试目前是脚本式测试，没有 pytest 依赖和断言体系。56 个 Python 文件都能通过语法解析，但查询测试验证的只是占位答案。
+
+综合来看，项目当前最准确的定位是：
+
+> “已经跑通的文档入库系统 + 已搭好架构但尚未实现核心检索的查询原型。”
+
+下一步开发优先级应是：先修复切片正确性和 Milvus 删除策略，再完成 `query_server.py`，随后依次接通商品确认、Milvus 混合检索、HyDE、RRF/Rerank、答案生成和 MongoDB 历史。

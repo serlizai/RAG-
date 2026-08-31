@@ -150,7 +150,7 @@ async def stream(session_id: str, request: Request):
 @app.get("/history/{session_id}")
 async def history(session_id: str, limit: int = 50):
     """
-    查询当前会话历史记录
+    查询当前会话历史记录，_id是objectID不能序列化
     """
     try:
         records = get_recent_messages(session_id, limit=limit)

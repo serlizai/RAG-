@@ -211,6 +211,10 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
         cursor = mongo_tool.chat_message.find(query).sort("ts", ASCENDING).limit(limit)
         # 将游标转为列表，触发实际数据库查询，获取所有符合条件的文档
         messages = list(cursor)
+        for message in messages:  # 处理mongo的_id是objectID不能序列化的问题，转换为字符串
+            if message.get("_id") is not None:
+                message["_id"] = str(message["_id"])
+
         # 返回查询结果列表
         return messages
     except Exception as e:

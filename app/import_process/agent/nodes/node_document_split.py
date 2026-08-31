@@ -168,7 +168,7 @@ def split_long_section(section, max_length):
 
     # title = 标题名_1/2/3  part 1 2 3 | parent_title = sections.title
     sub_sections = []
-    for index, chunk in enumerate(splitter.split(content), start=1):
+    for index, chunk in enumerate(splitter.split_text(content), start=1):
         text = chunk.strip()
         title = f"{section.get('title')}_{index}"
         parent_title = section.get("title")

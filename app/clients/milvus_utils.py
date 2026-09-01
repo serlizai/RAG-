@@ -123,7 +123,7 @@ def create_hybrid_search_requests(dense_vector, sparse_vector, dense_params=None
     :param sparse_vector: 文本生成的稀疏向量
     :param dense_params: 稠密向量搜索参数，默认使用余弦相似度
     :param sparse_params: 稀疏向量搜索参数，默认使用内积相似度
-    :param expr: 搜索过滤表达式，用于精准筛选数据
+    :param expr: 搜索过滤表达式，用于精准筛选数据,混合查询的查询条件
     :param limit: 单向量搜索返回结果数量，默认5
     :return: 搜索请求列表，包含[dense_req, sparse_req]
     """

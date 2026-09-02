@@ -68,6 +68,7 @@ def step_2_search_embedding_hyde(
     )
     # 混合查询
     milvus_client = get_milvus_client()
+    # AnnSearchRequest.limit >= hybrid_search.limit
     resp = hybrid_search(
         client=milvus_client,
         collection_name=milvus_config.chunks_collection,

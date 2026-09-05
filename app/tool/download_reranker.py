@@ -1,6 +1,6 @@
 from modelscope.hub.snapshot_download import snapshot_download
 
-local_dir = r"/Users/lwj/AI_project/RAG/models/BAAI\rerank"
+local_dir = r"/Users/lwj/AI_project/RAG/models"
 
 snapshot_download(
     model_id="BAAI/bge-reranker-large",

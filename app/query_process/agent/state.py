@@ -25,6 +25,7 @@ class QueryGraphState(TypedDict):
     # 生成过程中的数据
     prompt: str  # 组装好的 Prompt
     answer: str  # 最终生成的答案
+    image_urls: List[str]  # 最终答案关联的图片，随图结果返回接口层
 
     # 辅助信息
     item_names: List[str]  # 提取出的商品名称
@@ -45,6 +46,7 @@ query_graph_default_state: QueryGraphState = {
     "reranked_docs": [],
     "prompt": "",
     "answer": "",
+    "image_urls": [],
     "item_names": [],
     "rewritten_query": "",
     "history": [],

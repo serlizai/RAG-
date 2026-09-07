@@ -1,6 +1,7 @@
 # 6个接口 api状态、返回初始页面、发起提问、SSE流式处理(长连接)、查看历史对话、清空历史对话
 
 from pathlib import Path
+import json
 import uuid
 import uvicorn
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
@@ -12,7 +13,7 @@ from app.core.logger import logger
 from app.query_process.agent.state import create_query_default_state
 from app.utils.path_util import PROJECT_ROOT
 from app.utils.task_utils import *
-from app.utils.sse_utils import create_sse_queue, SSEEvent, sse_generator
+from app.utils.sse_utils import create_sse_queue, SSEEvent, sse_generator, push_to_session
 from app.clients.mongo_history_utils import *
 from app.query_process.agent.main_graph import query_app
 
@@ -59,9 +60,20 @@ def run_query_graph(query: str, session_id: str, is_stream: bool):
 
     state = create_query_default_state(session_id=session_id, original_query=query, is_stream=is_stream)
     try:
-        # 因为是节点自己调用push_to_session,只要state中is_stream为true就会流式输出，和这里关系不大
-        query_app.invoke(state)
+        # 节点发送增量；整个图执行完成后，由接口层统一发送最终结果。
+        final_state = query_app.invoke(state)
         update_task_status(session_id, TASK_STATUS_COMPLETED, is_stream)
+        if is_stream:
+            # 完成进度先入队，final 随后发送，前端收到 final 后才关闭 SSE。
+            push_to_session(
+                session_id,
+                SSEEvent.FINAL,
+                {
+                    "answer": final_state["answer"],
+                    "status": TASK_STATUS_COMPLETED,
+                    "image_urls": final_state.get("image_urls", []),
+                },
+            )
     except Exception as e:
         logger.exception(f"=======session_id:{session_id}，查询发生异常: {str(e)}==============")
         # 告诉前端发生错误
@@ -116,10 +128,13 @@ async def query(request: QueryRequest, background_tasks: BackgroundTasks):
         run_query_graph(query, session_id, is_stream)
         # 获取最后一个节点answer的结果
         answer = get_task_result(session_id, "answer")  # 获取会话结果函数
+        # 将任务结果中的 JSON 字符串还原成图片列表
+        image_urls = json.loads(get_task_result(session_id, "image_urls", "[]"))
         logger.info(f"query:{query}开启同步处理，处理结果为:{answer}")
         return {
             "message": "本次查询完成",
             "answer": answer,
+            "image_urls": image_urls,
             "session_id": session_id,
             "done_list": []
         }
@@ -181,4 +196,4 @@ async def delete_history(session_id: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=8004)

@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, Any, Optional, AsyncGenerator
 from fastapi import Request
 
-
+# 前端会根据事件类型来选择不同的方式处理数据
 class SSEEvent:
     READY = "ready"         # 连接建立
     PROGRESS = "progress"   # 任务节点进度

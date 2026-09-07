@@ -299,7 +299,7 @@
 
   <script>
     // 默认同源；如你把页面单独打开（file://），可改成 http://127.0.0.1:8001
-    const API_BASE = `${location.protocol}//${location.host}`.includes('http') ? `${location.protocol}//${location.host}` : 'http://127.0.0.1:8001';
+    const API_BASE = `${location.protocol}//${location.host}`.includes('http') ? `${location.protocol}//${location.host}` : 'http://127.0.0.1:8004';
     const chatEl = document.getElementById('chat');
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
@@ -768,11 +768,13 @@
         const es = new EventSource(`${API_BASE}/stream/${session_id}`);
         console.log('[perf] C EventSource created', performance.now(), { session_id });
         let rawAnswerText = '';
+        let lastDoneList = [];
 
         es.addEventListener('progress', (e) => {
           try{
             const d = JSON.parse(e.data || '{}');
-            renderProgress(botMsgEl, d.done_list, d.running_list, d.status);
+            if(Array.isArray(d.done_list)) lastDoneList = d.done_list;
+            renderProgress(botMsgEl, lastDoneList, d.running_list, d.status);
             // 当进度状态已完成时，提前结束“...”等待态
             if(d && d.status === 'completed'){
               const typing = botMsgEl.querySelector('.typing');
@@ -799,6 +801,8 @@
         es.addEventListener('final', (e) => {
           const typing = botMsgEl.querySelector('.typing');
           if(typing) typing.remove();
+          // final 后会关闭 SSE，不能依赖后续 progress 事件更新完成状态。
+          renderProgress(botMsgEl, lastDoneList, [], 'completed');
           // 收起进度条
           const progress = botMsgEl.querySelector('details.progress');
           if(progress) progress.removeAttribute('open');
@@ -817,6 +821,7 @@
            // 响应用户的 final_answer 信号，确保图片渲染
           const typing = botMsgEl.querySelector('.typing');
           if(typing) typing.remove();
+          renderProgress(botMsgEl, lastDoneList, [], 'completed');
           const progress = botMsgEl.querySelector('details.progress');
           if(progress) progress.removeAttribute('open');
           
@@ -832,6 +837,7 @@
         es.addEventListener('error', (e) => {
           const typing = botMsgEl.querySelector('.typing');
           if(typing) typing.remove();
+          renderProgress(botMsgEl, lastDoneList, [], 'failed');
           // 收起进度条
           const progress = botMsgEl.querySelector('details.progress');
           if(progress) progress.removeAttribute('open');
@@ -891,5 +897,4 @@
   </script>
 </body>
 </html>
-
 

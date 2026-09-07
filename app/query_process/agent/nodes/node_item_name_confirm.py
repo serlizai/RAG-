@@ -248,7 +248,7 @@ def node_item_name_confirm(state):
     节点功能：确认用户问题中的核心商品名称。
     目标：
     1.提取 item_name  大模型从 历史对话+本次提问 提取item_name->向量库搜索->打分
-    2.利用模型充血用户问题确保后续查询召回率更高
+    2.利用模型重写用户问题确保后续查询召回率更高
     参数：state['original_query']、session_id
     响应：item_names: List[str]  # 提取出的商品名称
           rewritten_query: str  # 改写后的问题
@@ -291,23 +291,13 @@ def node_item_name_confirm(state):
         align_result = step_5_align_item_names(query_results)
     else:
         logger.info("Node: 未提取到商品名，跳过向量检索")
+        align_result = {"confirmed_item_names": [], "options_item_names": []}
 
     # 6.处理确认和可选集合：确认 =》继续下一个节点 | | 有可选或没有item_name->赋值answer
     state = step_6_deal_list(state, align_result, history, rewritten_query)
 
-    # 7.记录本次聊天对话(answer)
-    if state.get("answer"):
-        # 对话结束
-        save_chat_message(
-            session_id=state["session_id"],
-            role="assistant",
-            text=state["answer"],
-            item_names=state.get("item_names", []),
-            image_urls=[],
-            rewritten_query = ""  # 助手消息不需要重写
-        )
-
-    # 强制更新本次用户原始问题的关联信息（核心：补充改写查询、商品名）
+    # 澄清提示保留在 state["answer"]，由 node_answer_output 统一输出并保存。
+    # 7.更新本次用户原始问题的关联信息（补充改写查询、商品名）
     save_chat_message(
         session_id=state["session_id"],  # 会话ID，关联所属会话
         role="user",  # 消息角色：用户

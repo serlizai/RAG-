@@ -34,6 +34,10 @@ class ImportGraphState(TypedDict):
     md_content: str       # Markdown 的全文内容
     chunks: list          # 切片后的文本列表，包含 metadata
     item_name: str        # 识别出的主体名称 (如: "万用表")，用于增强检索
+    # 每条结果对应一个切片，保存原始 chunk_id、商品归属、实体、关系及原文证据。
+    # 这是图谱入库使用的抽取结果，不是查询流程中的 kg_chunks 召回列表。
+    kg_extractions: list
+    kg_import_stats: dict  # Neo4j 成功提交后记录本批商品、切片、实体及关系数量
 
     # --- 数据库相关 ---
     embeddings_content: list # 包含向量数据的列表，准备写入 Milvus
@@ -58,6 +62,8 @@ graph_default_state: ImportGraphState = {  # ImportGraphState限定了必须有�
     "md_content": "",
     "chunks": [],
     "item_name": "",
+    "kg_extractions": [],
+    "kg_import_stats": {},
     "embeddings_content": []
 }
 

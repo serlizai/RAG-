@@ -1,4 +1,5 @@
-import os
+import re
+from numbers import Integral
 from pymilvus import MilvusClient, AnnSearchRequest, WeightedRanker
 from app.conf.milvus_config import milvus_config
 from app.core.logger import logger
@@ -22,8 +23,16 @@ def get_milvus_client():
             if not milvus_uri:
                 logger.error("Milvus客户端连接失败：缺少MILVUS_URL环境变量配置")
                 return None
-            # 初始化Milvus客户端
-            _milvus_client = MilvusClient(uri=milvus_uri)
+            # 模型抽取期间连接可能长时间空闲。关闭无 RPC 时的心跳，
+            # 并将活动连接的心跳间隔从 SDK 默认的 10 秒放宽到 5 分钟，
+            # 避免服务端因过密 PING 返回 GOAWAY / too_many_pings。
+            _milvus_client = MilvusClient(
+                uri=milvus_uri,
+                grpc_options={
+                    "grpc.keepalive_time_ms": 300_000,
+                    "grpc.keepalive_permit_without_calls": False,
+                },
+            )
             logger.info("Milvus客户端连接成功")
         return _milvus_client
     except Exception as e:
@@ -38,14 +47,26 @@ def _coerce_int64_ids(ids):
     :param ids: 待转换的chunk_id列表
     :return: 元组(ok_ids, bad_ids)，ok_ids为可转换的int64类型ID列表，bad_ids为无效ID列表
     """
-    ok, bad = [], []
+    ok, bad, seen = [], [], set()
     for x in (ids or []):
-        if x is None:
-            continue
         try:
-            ok.append(int(x))
-        except Exception:
+            # int(1.8) 和 int(True) 都不会报错，却会误查 ID=1。
+            # 这里只接受整数或十进制整数字符串，再检查有符号 INT64 范围。
+            if isinstance(x, bool) or not (
+                isinstance(x, Integral)
+                or (isinstance(x, str) and re.fullmatch(r"[+-]?[0-9]+", x.strip()))
+            ):
+                raise ValueError("不是整数 ID")
+            chunk_id = int(x)
+            if not -(2**63) <= chunk_id < 2**63:
+                raise ValueError("超出 INT64 范围")
+        except (TypeError, ValueError, OverflowError):
             bad.append(x)
+            continue
+        # 去重但保留第一次出现的位置，也就是图谱给出的召回排名。
+        if chunk_id not in seen:
+            seen.add(chunk_id)
+            ok.append(chunk_id)
     return ok, bad
 
 
@@ -56,6 +77,7 @@ def fetch_chunks_by_chunk_ids(
         *,
         output_fields=None,
         batch_size: int = 100,
+        timeout: float = 5.0,
 ):
     """
     通过chunk_id主键批量查询Milvus中的切片数据
@@ -66,22 +88,27 @@ def fetch_chunks_by_chunk_ids(
     :param chunk_ids: 待查询的chunk_id列表
     :param output_fields: 需要返回的字段列表，默认返回核心切片字段
     :param batch_size: 分批查询大小，避免单次查询数据量过大，默认100
-    :return: List[dict]，Milvus实体字典列表，查询失败返回空列表
+    :param timeout: 每次 get/query 请求的超时秒数
+    :return: List[dict]，按输入 ID 顺序返回的实体；缺失或查询失败的批次跳过
     """
     # 前置校验：客户端/集合名无效直接返回空
     if client is None:
         return []
     if not collection_name:
         return []
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError("batch_size 必须是正整数")
     # 默认返回字段：核心切片标识与内容字段
     if output_fields is None:
         output_fields = ["chunk_id", "content", "title", "parent_title", "item_name"]
+    # 恢复排名需要主键。复制字段列表，避免修改调用方传进来的列表。
+    output_fields = list(dict.fromkeys(["chunk_id", *output_fields]))
 
     # 转换ID为INT64类型，分离有效/无效ID
     ok_ids, bad_ids = _coerce_int64_ids(chunk_ids)
     if bad_ids:
         # 记录无效ID，跳过查询
-        logger.warning(f"存在无法转换为INT64的chunk_id，将跳过查询：{bad_ids}")
+        logger.warning(f"跳过 {len(bad_ids)} 个无效 INT64 chunk_id")
 
     # 无有效ID直接返回空
     if not ok_ids:
@@ -95,7 +122,8 @@ def fetch_chunks_by_chunk_ids(
         # 方式1：优先使用主键get方法查询（性能最优）
         if hasattr(client, "get"):
             try:
-                got = client.get(collection_name=collection_name, ids=batch, output_fields=output_fields)
+                got = client.get(collection_name=collection_name, ids=batch, output_fields=output_fields,
+                                 timeout=timeout)
                 if got:
                     results.extend(got)
                 continue
@@ -105,13 +133,24 @@ def fetch_chunks_by_chunk_ids(
         # 方式2：get方法失败，回退使用filter过滤查询
         try:
             expr = f"chunk_id in [{', '.join(str(x) for x in batch)}]"
-            q = client.query(collection_name=collection_name, filter=expr, output_fields=output_fields)
+            q = client.query(collection_name=collection_name, filter=expr, output_fields=output_fields,
+                             timeout=timeout)
             if q:
                 results.extend(q)
         except Exception as e:
             logger.error(f"Milvus query方法批量查询chunk_id失败：{str(e)}", exc_info=True)
 
-    return results
+    # 数据库不保证按 ids 的传入顺序返回，因此不能直接把 results 交给 RRF。
+    # 例如请求 [103, 101]，即使数据库返回 [101, 103]，这里仍恢复成 [103, 101]。
+    by_id = {}
+    requested_ids = set(ok_ids)
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        row_ids, _ = _coerce_int64_ids([row.get("chunk_id")])
+        if row_ids and row_ids[0] in requested_ids:
+            by_id.setdefault(row_ids[0], {**row, "chunk_id": row_ids[0]})
+    return [by_id[chunk_id] for chunk_id in ok_ids if chunk_id in by_id]
 
 
 def create_hybrid_search_requests(dense_vector, sparse_vector, dense_params=None, sparse_params=None, expr=None,

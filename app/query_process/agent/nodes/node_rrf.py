@@ -18,12 +18,21 @@ def reciprocal_rank_fusion(source_with_weight, top_k:int=5):
 
     # 3.循环处理每个集合中的数据进行积分计算
     for source, weight in source_with_weight:
+        seen = set()  # 同一路重复出现的切片只能投一次票；跨路命中才累加。
         # 嵌套便利具体的数据和chunk
-        for rank, chunk in enumerate(source, start=1):  # 已经排过序了从大到小
-            chunk_id = chunk.get("id") or chunk.get("entity").get("chunk_id")
-            if not chunk_id:
+        for chunk in source or []:  # 已经排过序了从大到小
+            chunk_id = chunk.get("id")
+            if chunk_id is None:
+                chunk_id = (chunk.get("entity") or {}).get("chunk_id")
+            if chunk_id is None:
                 logger.warning(f"缺少 chunk_id 的数据: {chunk}")
                 continue
+            # 向量路可能给整数，其他路可能给字符串，统一键后才能跨路去重。
+            chunk_id = str(chunk_id)
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            rank = len(seen)
 
             # 计算当前chunk RRF 得分
             score_dict[chunk_id] = score_dict.get(chunk_id, 0) + 1.0 * weight / (rank + 60)  # 累加
@@ -38,7 +47,7 @@ def reciprocal_rank_fusion(source_with_weight, top_k:int=5):
     merged.sort(key=lambda x: x[1], reverse=True)
 
     merged = merged[:top_k]
-    logger.info(f"RRF 融合完成，Top {top_k} 结果: {[{'chunk_id': c.get('id') or c.get('entity').get('chunk_id'), 'score': s} for c, s in merged]}")
+    logger.info(f"RRF 融合完成，Top {top_k}，保留 {len(merged)} 个切片")
 
     return [chunk for chunk, score in merged]
 
@@ -52,9 +61,9 @@ def node_rrf(state):
     RRF 是一种无需训练的算法，仅根据文档在不同列表中的排名来计算最终得分。
 
     步骤：
-    1. 提取各路检索结果：从 state 中获取 embedding_chunks 和 hyde_embedding_chunks。
+    1. 提取各路检索结果：embedding_chunks、hyde_embedding_chunks、kg_chunks。
     2. 结果标准化：将不同格式的检索结果统一转换为包含 chunk_id 的实体列表。
-    3. 设置权重：为不同来源分配权重（当前配置：Embedding=1.0, HyDE=1.0）。
+    3. 设置权重：为不同来源分配权重（三路初始权重均为 1.0）。
     4. 执行 RRF：计算融合分数并重新排序。
     5. 结果截断：保留 Top K 个结果。
     6. 更新状态：将融合后的结果存入 state["rrf_chunks"]
@@ -65,6 +74,7 @@ def node_rrf(state):
     # 获取同源数据
     embedding_chunks = state.get("embedding_chunks")
     hyde_embedding_chunks = state.get("hyde_embedding_chunks")
+    kg_chunks = state.get("kg_chunks")
     # 单列查询 data = [向量1，向量2] -> [[向量1], [向量2]]
     # 混合查询 reps = [AnnSearchRequest] -> [[]] -> [{id:实体主键, distance:得分, entity:{}},{}...]
     # 数据进行整合(捏到一起)
@@ -72,9 +82,12 @@ def node_rrf(state):
     source_with_weight = [
         (embedding_chunks, 1.0),
         (hyde_embedding_chunks, 1.0),
+        (kg_chunks, 1.0),
     ]
     # rrf算法进行数据排序处理
-    rrf_response = reciprocal_rank_fusion(source_with_weight)
+    # 多一条召回通道后保留更多候选，让后续 Reranker 再判断相关性。
+    # 20 是候选数上限，不是最终回答引用的切片数。
+    rrf_response = reciprocal_rank_fusion(source_with_weight, top_k=20)
     # 将排序后的数据添加到state[rrf_chunks]属性即可
 
     add_done_task(state['session_id'], sys._getframe().f_code.co_name, state.get("is_stream"))

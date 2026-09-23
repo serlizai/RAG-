@@ -11,6 +11,7 @@ from app.query_process.agent.nodes.node_search_embedding import node_search_embe
 from app.query_process.agent.nodes.node_search_embedding_hyde import node_search_embedding_hyde
 from app.query_process.agent.nodes.node_query_kg import node_query_kg
 from app.query_process.agent.nodes.node_web_search_mcp import node_web_search_mcp
+from app.query_process.agent.nodes.node_evidence_guard import node_evidence_guard
 
 builder = StateGraph(QueryGraphState)
 
@@ -21,6 +22,7 @@ builder.add_node("node_query_kg", node_query_kg)                   # 知识图�
 builder.add_node("node_web_search_mcp", node_web_search_mcp)
 builder.add_node("node_rrf", node_rrf)                             # 排序
 builder.add_node("node_rerank", node_rerank)                       # 重排
+builder.add_node("node_evidence_guard", node_evidence_guard)       # 资料适用性与单机证据检查
 builder.add_node("node_answer_output", node_answer_output)         # 生成
 
 # 添加边
@@ -50,7 +52,8 @@ builder.add_edge("node_search_embedding_hyde", "node_rrf")
 builder.add_edge("node_query_kg", "node_rrf")  # 图谱原文与向量召回一起参与 RRF
 builder.add_edge("node_web_search_mcp", "node_rrf")  # 只是将结果让入到rrf节点的state不参与粗排
 builder.add_edge("node_rrf", "node_rerank")  # 联网搜索与三路本地召回结果一起重排
-builder.add_edge("node_rerank", "node_answer_output")
+builder.add_edge("node_rerank", "node_evidence_guard")
+builder.add_edge("node_evidence_guard", "node_answer_output")
 builder.add_edge("node_answer_output", END)
 
 query_app = builder.compile()

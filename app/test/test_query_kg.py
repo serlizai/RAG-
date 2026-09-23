@@ -185,6 +185,7 @@ class KGReferencePipelineTests(unittest.TestCase):
             "node_search_embedding_hyde": lambda s: {"hyde_embedding_chunks": [hit(2)]},
             "node_web_search_mcp": lambda s: {"web_search_docs": []},
             "node_rrf": fused, "node_rerank": rerank,
+            "node_evidence_guard": lambda s: {},  # 证据核验在专门的离线测试中覆盖
             "node_answer_output": lambda s: {"answer": "测试回答"},
         }
         modules = {}

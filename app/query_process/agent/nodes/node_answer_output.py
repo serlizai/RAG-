@@ -8,6 +8,8 @@ from app.core.logger import logger
 from app.core.load_prompt import load_prompt
 from app.lm.lm_utils import get_llm_client
 from app.clients.mongo_history_utils import save_chat_message
+from app.query_process.agent.evidence_guard import review_answer
+from app.query_process.agent.nodes.node_evidence_guard import node_evidence_guard
 import re
 import time
 
@@ -47,7 +49,7 @@ def step_2_construct_prompt(state):
     :return:
     """
     # 获取数据
-    rewritten_query = state.get("rewritten_query") or state.get("original_query") or ""
+    question = state.get("original_query") or state.get("rewritten_query") or ""
     reranked_docs = state.get("reranked_docs", [])
     item_names = state.get("item_names", [])
     history = state.get("history", [])
@@ -60,6 +62,7 @@ def step_2_construct_prompt(state):
         [2]...
     """
     docs = []
+    context_docs = []
     used_length = 0  # 使用的长度
     for i, doc in enumerate(reranked_docs, start=1):
         text = doc.get("text")
@@ -73,8 +76,11 @@ def step_2_construct_prompt(state):
             logger.info(f"达到最大上下文长度限制，停止添加更多文档。当前使用长度: {used_length}, 文档长度: {len(content)}, 最大限制: {MAX_CONTEXT_CHARS}")
             break
         docs.append(content)
+        context_docs.append(doc)
         used_length += len(content) + 2
     final_context = "\n\n".join(docs)
+    # 复核和图片提取只能使用本次实际送入生成模型的片段。
+    state["reranked_docs"] = context_docs
     # 处理history聊天记录内容
     history_str = ""
     if history and len(history) > 0:
@@ -84,14 +90,12 @@ def step_2_construct_prompt(state):
             current_history = ""
             if role == "user" and text:
                 current_history = f"用户: {text}\n"
-            elif role == "assistant" and text:
-                current_history = f"助手: {text}\n"
-
-            used_length += len(current_history)
-            history_str += current_history
-            if used_length > MAX_CONTEXT_CHARS:
+            # 旧助手回答可能含未核验断言，不再作为生成依据。
+            if used_length + len(current_history) > MAX_CONTEXT_CHARS:
                 logger.info(f"达到最大上下文长度限制，停止添加更多历史记录。当前使用长度: {used_length}, 最大限制: {MAX_CONTEXT_CHARS}")
                 break
+            used_length += len(current_history)
+            history_str += current_history
     else:
         history_str = "无历史对话记录"
     # 处理item_name
@@ -101,14 +105,15 @@ def step_2_construct_prompt(state):
                            context=final_context,
                            history=history_str,
                            item_names=item_names_str,
-                           question=rewritten_query)
+                           policy=json.dumps(state.get("evidence_policy", {}), ensure_ascii=False),
+                           question=question)
     logger.info(f"构建Prompt完成，长度: {len(final_prompt)}, 内容:{final_prompt}")
     return final_prompt
 
 
 def step_3_generate_response(state, prompt):
     """
-    使用模型生成最终答案
+    生成完整草稿，核验通过后才发送；SSE 保留进度事件，不提前发送草稿。
     :param state:
     :param prompt:
     :return:
@@ -117,20 +122,24 @@ def step_3_generate_response(state, prompt):
     model = get_llm_client()
     # 获取流式状态
     is_stream = state.get("is_stream", False)
-    answer = ""
+    response = model.invoke(prompt)
+    review_node = "answer_evidence_review"
+    add_running_task(state['session_id'], review_node, is_stream)
+    try:
+        answer, verified = review_answer(state, response.text)
+    finally:
+        add_done_task(state['session_id'], review_node, is_stream)
+    state["answer_verified"] = verified
+    if not verified:
+        state["reranked_docs"] = []
+        state["image_urls"] = []
     if is_stream:
-        # 调用模型进行生成
-        for chunk in model.stream(prompt):  # 流式
-            delta = chunk.text  # content 可能是内容块列表，text 提取其中的文本
-            answer += delta
-            push_to_session(state['session_id'], SSEEvent.DELTA, {"delta": delta})
+        push_to_session(state['session_id'], SSEEvent.DELTA, {"delta": answer})
     else:
-        response = model.invoke(prompt)
-        answer = response.text
         set_task_result(state['session_id'], "answer", answer)
     # state赋值和返回结果
     state["answer"] = answer
-    logger.info(f"大模型生成答案完成，长度: {len(answer)}, 内容: {answer}")
+    logger.info(f"回答核验完成，verified={verified}，长度: {len(answer)}, 内容: {answer}")
     return answer
 
 
@@ -207,7 +216,7 @@ def node_answer_output(state):
     宏观：topk内容->大模型润色->润色结果->sse输出到前端  push_to_session流式、set_task_result非流式
     1 判断state 中的answer是否已经存在，如果存在直接输出answer中的答案，注意判断是否需要流式输出需要则流式输出
     2 根据state中的问题、重新问题、历史对话、提问商品（item_names）、 重排内容 组织prompt 并调用llm 生成润色答案
-    3 调用大模型生成答案，流式模式推送文本增量，图片列表写入state
+    3 调用大模型生成并复核答案，通过后在 SSE 模式发送完整文本，图片列表写入state
     4 将本轮助手回复及图片写入MongoDB，用户提问由入口节点保存
     5 通过state返回答案和图片；查询图完成后，由接口层发送final事件
     接口层发送的最终结果格式：
@@ -225,6 +234,10 @@ def node_answer_output(state):
     """
     logger.info("---node_answer_output (答案生成) 节点开始处理---")
     add_running_task(state['session_id'], sys._getframe().f_code.co_name, state.get("is_stream"))
+
+    # 单独调用本节点也不能绕过核验；主图正常路径已经完成此步骤。
+    if not state.get("answer") and not state.get("evidence_policy"):
+        state.update(node_evidence_guard(state))
 
     # 阶段一：检查answer是否存在,如果存在直接输出answer中的答案
     answer_exists = step_1_check_answer(state)

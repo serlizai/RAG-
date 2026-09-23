@@ -221,11 +221,12 @@ def merge_short_sections(final_sections, min_length = MIN_CONTENT_LENGTH):
             pre_section['part'] = section.get('part')  # 改成最新的part
             logger.debug(f"合并短Chunk：{pre_section.get('parent_title')} → 累计长度{len(pre_section['content'])}")
         else:
-            # 不是短块或父标题不同
-            merge_sections.append(section)
-            pre_section = section  # 迭代
+            # 无法继续合并时，先保存上一块（可能已累计合并多块），
+            # 再把当前块留到下一轮处理，避免丢首块或提前重复保存当前块。
+            merge_sections.append(pre_section)
+            pre_section = section
 
-    # 最后一个块可能没有被加入merge_sections，需要检查
+    # 循环结束后，最后一个待处理块只保存一次。
     if pre_section is not None:
         merge_sections.append(pre_section)
 
@@ -327,10 +328,10 @@ def node_document_split(state: ImportGraphState) -> ImportGraphState:
     """
     节点: 文档切分 (node_document_split)
     为什么叫这个名字: 将长文档切分成小的 Chunks (切片) 以便检索。
-    未来要实现:
-    1. 基于 Markdown 标题层级进行递归切分。
-    2. 对过长的段落进行二次切分。
-    3. 生成包含 Metadata (标题路径) 的 Chunk 列表。
+    1. 按 Markdown 标题边界分章节；无标题时将全文作为一个章节。
+    2. 仅对超过长度上限的章节进行递归字符切分，并保留上下文重叠。
+    3. 合并相邻且具有相同父标题的短块，补全标题、分片编号等元数据。
+    4. 将切片写入 state，并备份到 chunks.json。
     """
     function_name = sys._getframe().f_code.co_name
     logger.info(f">>> [Stub] 执行节点: {function_name}")

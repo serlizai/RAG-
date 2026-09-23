@@ -55,6 +55,8 @@ def step_1_merge_docs(state):
             "text": entity.get("content", ""),
             "chunk_id": entity.get("chunk_id") or entity.get("id"),
             "title": entity.get("title") or entity.get("item_name") or "",
+            "file_title": entity.get("file_title") or "",
+            "item_name": entity.get("item_name") or "",
             "url": "",
             "source": "local"
         })

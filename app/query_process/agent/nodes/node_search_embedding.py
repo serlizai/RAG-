@@ -45,7 +45,7 @@ def node_search_embedding(state):
         reqs=search_requests,
         ranker_weights=(0.9, 0.1),
         norm_score=True,
-        output_fields=["chunk_id", "content", "item_name"]  # 指定返回的业务字段
+        output_fields=["chunk_id", "content", "item_name", "title", "file_title"]
     )
     # 处理查询结果赋值embedding_chunks属性
     result_chunks = resp[0] if resp and len(resp) > 0 else []

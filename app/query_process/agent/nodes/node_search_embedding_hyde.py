@@ -41,7 +41,7 @@ def step_2_search_embedding_hyde(
         top_k: int = 5,
         ranker_weights=(0.8, 0.2),  # 调整默认权重以偏向稠密向量 (0.8, 0.2)
         norm_score: bool = True,    # 默认开启归一化
-        output_fields= ["chunk_id", "content", "item_name"],
+        output_fields= ["chunk_id", "content", "item_name", "title", "file_title"],
 ):
     """
     利用“重写问题 + 假设性文档”生成 embedding，并到向量库检索切片

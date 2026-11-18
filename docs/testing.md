@@ -68,12 +68,12 @@ MinerU 冒烟只在临时目录保存解析结果，不写入知识库。模型�
 uv run --locked python -m app.test.test_import_main_graph /path/to/document.pdf
 ```
 
-## 后续 CI
+## GitHub Actions
 
-CI 的默认命令与本地保持一致：
+[CI 工作流](../.github/workflows/ci.yml)在推送到 `main`、针对 `main` 的拉取请求和手动触发时运行。它在 Ubuntu 上读取 `.python-version` 并用 `uv sync --locked` 安装依赖，然后执行与本地相同的测试命令。
 
 ```bash
 uv run --locked python -m scripts.run_tests unit
 ```
 
-它不需要真实 `.env`、模型文件或服务密钥。数据库测试和在线冒烟应作为独立任务，使用显式配置，不混入默认离线检查。本次只整理测试入口，尚未添加 GitHub Actions 工作流。
+离线测试使用虚拟配置。数据库集成和在线冒烟仍通过上文的入口单独执行。运行结果可在 [GitHub Actions](https://github.com/serlizai/RAG-/actions/workflows/ci.yml) 查看。

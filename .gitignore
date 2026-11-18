@@ -11,6 +11,13 @@ wheels/
 
 # Environment variables
 .env
+.env.*
+!.env.example
+!.env.test.example
+
+# Downloaded model weights and macOS metadata
+/models/
+.DS_Store
 
 # Documents and logs (too large for git)
 doc/

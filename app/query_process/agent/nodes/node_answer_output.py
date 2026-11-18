@@ -10,7 +10,7 @@ from app.lm.lm_utils import get_llm_client
 from app.clients.mongo_history_utils import save_chat_message
 from app.query_process.agent.evidence_guard import review_answer
 from app.query_process.agent.nodes.node_evidence_guard import node_evidence_guard
-import re
+from app.utils.document_image_utils import image_references, normalize_document_images, resolve_image_url
 import time
 
 _IMAGE_BLOCK_MARKER = "【图片】"
@@ -65,7 +65,8 @@ def step_2_construct_prompt(state):
     context_docs = []
     used_length = 0  # 使用的长度
     for i, doc in enumerate(reranked_docs, start=1):
-        text = doc.get("text")
+        text = normalize_document_images(doc.get("text") or "", doc.get("file_title") or "")
+        doc = {**doc, "text": text}
         chunk_id = doc.get("chunk_id")
         source = doc.get("source")
         url = doc.get("url")
@@ -180,8 +181,6 @@ def _extract_images_from_docs(state):
     image_urls = []  # 有先后顺序
     set_images = set()  # 去重
 
-    # 正则
-    image_reg = re.compile(r"!\[.*?]\((.*?)\)")
     # 处理切片
     reranked_docs = state.get("reranked_docs", [])
     for doc in reranked_docs:
@@ -193,18 +192,12 @@ def _extract_images_from_docs(state):
                     set_images.add(url)
         text = doc.get("text")
         if text:
-            # 从text里面提取图片
-            # findall 机制解释：
-            # 正则表达式 r'!\[.*?\]\((.*?)\)' 中包含一个捕获组 (.*?)
-            # 当存在捕获组时，findall 只返回括号内匹配到的内容（即 URL），而不是整个 ![...](...) 字符串
-            # 示例：
-            # 输入 text: "参考图片 ![面板图](http://img.com/1.jpg) 如下"
-            # 返回 matches: ['http://img.com/1.jpg']
-            matches = image_reg.findall(text)
-            for match in matches:
-                if match not in set_images:
-                    image_urls.append(match)
-                    set_images.add(match)
+            # 同时读取 Markdown 图片和 HTML 表格内的 img。
+            for ref in image_references(text):
+                image_url = resolve_image_url(ref.url, doc.get("file_title") or "")
+                if image_url and image_url not in set_images:
+                    image_urls.append(image_url)
+                    set_images.add(image_url)
 
     logger.info(f"提取图片URL完成，数量: {len(image_urls)}, 内容: {image_urls}")
     state["image_urls"] = image_urls

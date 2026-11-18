@@ -260,6 +260,17 @@ class QueryDeliveryTests(unittest.TestCase):
         self.assertEqual(result["answer"], guard.NO_DEVICE_EVIDENCE)
         self.model.invoke.assert_not_called()
 
+    def test_images_include_html_and_do_not_truncate_parenthesized_urls(self):
+        title = "B520 用户手册-(Windows11,zh-cn)"
+        html = doc('<table><img src="images/panel.jpg"/></table>', file_title=title)
+        markdown = doc('![图片](https://example.com/manual(v1)/photo.jpg)')
+        state = {**self.state, "reranked_docs": [html, markdown, doc('![未知](images/missing.jpg)')]}
+        result = self.output["_extract_images_from_docs"](state)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[0].endswith("/panel.jpg"))
+        self.assertIn("%28Windows11%2Czh-cn%29", result[0])
+        self.assertEqual(result[1], "https://example.com/manual%28v1%29/photo.jpg")
+
     def test_actual_graph_runs_guard_before_answer_generation(self):
         callbacks = {
             "node_item_name_confirm": lambda s: {"item_names": ["设备 A"]},

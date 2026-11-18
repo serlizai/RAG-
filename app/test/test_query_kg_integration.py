@@ -30,6 +30,8 @@ from app.utils.task_utils import clear_task
     "需要显式指定 Neo4j 和 Milvus 测试地址",
 )
 class KGRecallIntegrationTests(unittest.TestCase):
+    test_scope = "integration"
+
     @classmethod
     def setUpClass(cls):
         suffix = uuid.uuid4().hex
@@ -49,7 +51,7 @@ class KGRecallIntegrationTests(unittest.TestCase):
         # 本测试验证 ID 回查，完全不依赖向量的语义质量。
         schema = cls.client.create_schema(auto_id=True, enable_dynamic_field=False)
         schema.add_field("chunk_id", DataType.INT64, is_primary=True, auto_id=True)
-        for name in ("content", "item_name", "title", "parent_title"):
+        for name in ("content", "item_name", "title", "parent_title", "file_title"):
             schema.add_field(name, DataType.VARCHAR, max_length=65535)
         schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=4)
         indexes = cls.client.prepare_index_params()
@@ -86,7 +88,7 @@ class KGRecallIntegrationTests(unittest.TestCase):
                 "relations": [{"source": "e0", "target": "e1", "relation": "关联", "evidence": content}],
             })
         rows = [{**{k: d[k] for k in ("content", "title", "item_name")},
-                 "parent_title": "测试手册", "dense_vector": [1.0, 0.0, 0.0, 0.0]}
+                 "parent_title": "测试手册", "file_title": "测试手册", "dense_vector": [1.0, 0.0, 0.0, 0.0]}
                 for d in extractions]
         result = cls.client.insert(cls.collection, rows, timeout=10)
         cls.ids = list(result["ids"])

@@ -178,6 +178,7 @@ async def history(session_id: str, limit: int = 50):
                 "text": r.get("text", ""),
                 "rewritten_query": r.get("rewritten_query", ""),
                 "item_names": r.get("item_names", []),
+                "image_urls": r.get("image_urls", []),
                 "ts": r.get("ts")
             })
         logger.info(f"session_id={session_id}查询历史对话成功,数据为:{items}")

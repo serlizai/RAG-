@@ -1,26 +1,32 @@
+"""手动导入演示；导入模块或收集测试时不运行工作流。"""
+
+import argparse
 import json
+from pathlib import Path
 
-from app.import_process.agent.main_graph import kb_import_app
-from app.import_process.agent.state import create_default_state
-import sys
-from app.core.logger import logger
 
-logger.info("===== 开始测试 =====")
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("pdf", type=Path, help="需要导入的本地 PDF；会调用外部服务并写入知识库")
+    args = parser.parse_args(argv)
+    pdf = args.pdf.expanduser().resolve()
+    if not pdf.is_file():
+        parser.error("指定的 PDF 文件不存在")
 
-initial_state = create_default_state(local_file_path="万用表RS-12的使用.pdf")
-final_state = None
+    from app.core.logger import logger
+    from app.import_process.agent.main_graph import kb_import_app
+    from app.import_process.agent.state import create_default_state
+    from app.utils.path_util import PROJECT_ROOT
+    import uuid
 
-# 只输出更最终的状态值（字典形式），不包含节点名称、执行日志、元数据等额外信息
-for event in kb_import_app.stream(initial_state):
-    for key, value in event.items():  # items() 是字典的方法。它会把字典里的每一组 key-value 拿出来
-        logger.info(f"节点: {key}")
-        final_state = value
+    task_id = "import-demo-" + uuid.uuid4().hex
+    output = PROJECT_ROOT / "output" / task_id
+    output.mkdir(parents=True, exist_ok=True)
+    state = create_default_state(task_id=task_id, local_file_path=str(pdf), local_dir=str(output))
+    result = kb_import_app.invoke(state)
+    logger.info("导入完成，图谱统计：{}", json.dumps(result.get("kg_import_stats", {}), ensure_ascii=False))
+    return 0
 
-# 格式化输出最终状态
-logger.info(f"最终状态: {json.dumps(final_state, indent=4, ensure_ascii=False)}")
 
-logger.info("图结构:")
-# uv add grandalf
-kb_import_app.get_graph().print_ascii()
-
-logger.info("===== 测试结束 =====")
+if __name__ == "__main__":
+    raise SystemExit(main())

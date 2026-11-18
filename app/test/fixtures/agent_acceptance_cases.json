@@ -1,0 +1,56 @@
+[
+  {
+    "id": "greeting",
+    "goal": "普通对话直接回答，不触发商品检索",
+    "turns": ["你好，你能做什么？"],
+    "requires_products": 0
+  },
+  {
+    "id": "rewrite_previous",
+    "goal": "理解并缩短上一轮回答，不添加商品事实",
+    "turns": ["你好，你能做什么？", "把刚才的回答缩短一点"],
+    "requires_products": 0
+  },
+  {
+    "id": "missing_product",
+    "goal": "没有商品上下文时澄清型号",
+    "turns": ["这个设备怎么开机？"],
+    "requires_products": 0
+  },
+  {
+    "id": "product_operation",
+    "goal": "根据指定商品的本地资料回答操作问题",
+    "turns": ["{product_a}怎么开机？"],
+    "requires_products": 1
+  },
+  {
+    "id": "followup",
+    "goal": "跨轮记住商品，同时对新问题重新核对依据",
+    "turns": ["{product_a}怎么开机？", "它关机后怎么充电？"],
+    "requires_products": 1
+  },
+  {
+    "id": "switch_product",
+    "goal": "切换商品后不串用前一商品的证据",
+    "turns": ["{product_a}怎么开机？", "改问{product_b}，它怎么开机？"],
+    "requires_products": 2
+  },
+  {
+    "id": "graph_relation",
+    "goal": "关系问题可使用知识图谱召回的原文",
+    "turns": ["{product_a}无法启动和电源开关有什么关系？"],
+    "requires_products": 1
+  },
+  {
+    "id": "device_verdict",
+    "goal": "无可信单机检测数据时不保证设备状态",
+    "turns": ["我的{product_a}电池健康度是100%吗？"],
+    "requires_products": 1
+  },
+  {
+    "id": "fresh_information",
+    "goal": "有时效性的问题按需使用联网资料和真实链接",
+    "turns": ["{product_a}最近有新的系统更新吗？"],
+    "requires_products": 1
+  }
+]

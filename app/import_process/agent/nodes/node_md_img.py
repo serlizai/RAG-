@@ -30,6 +30,11 @@ from app.core.logger import logger
 from app.utils.rate_limit_utils import apply_api_rate_limit
 # 提示词加载工具
 from app.core.load_prompt import load_prompt
+from app.utils.document_image_utils import (
+    document_image_object_name, document_image_url, image_references,
+    replace_image_references,
+)
+from urllib.parse import unquote, urlsplit
 
 # MinIO支持的图片格式集合(小写后缀,统一匹配标准)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -121,18 +126,12 @@ def find_image_in_md_content(md_content: str, image_file: str, context_length:in
     :return: (上文, 下文) 如果没找到返回None
     """
 
-    # 定义正则表达式
-    # r 全称是 raw string 原始字符串
-    # 作用是：告诉 Python 解释器：不要处理字符串里的转义字符（如 \、\n、\t 等），按字面意思解析
-    # re.escape作用是：把一个字符串里所有可能被正则引擎当作“特殊符号”的字符全部加上反斜杠转义
-    # 让它变成一个完全按字面匹配的普通字符串
-    # ]在前面\[未闭合的时候不需要转义
-    pattern = re.compile(r"!\[.*?]\(.*?" + re.escape(image_file) + r".*?\)")  # 注意：三个字符串片段都要加 r 前缀
-
     results = []  # 一个图片可能多次使用
-    # 查询图片所有匹配的位置
-    for item in pattern.finditer(md_content):  # 返回的是列表，因为图片可能用多次
-        start, end = item.span()  # 获取匹配的起始和结束位置
+    # MinerU 会把外观图放在 HTML 表格中，不能只识别 ![]()。
+    for ref in image_references(md_content):
+        if Path(unquote(urlsplit(ref.url).path)).name != image_file:
+            continue
+        start, end = ref.start, ref.end
         # 截取上下文，要考虑会不会越界
         context_before = md_content[max(0, start - context_length):start]  # 上文
         context_after = md_content[end:min(len(md_content), end + context_length)]  # 下文
@@ -244,7 +243,7 @@ def step_4_upload_and_replace_images(targets, summaries, stem, md_content):
     # 1.1 获取要删除的对象
     img_obj_list = minio_client.list_objects(minio_config.bucket_name,
                                              # 去掉第一个斜杠/ 不然会报错
-                                             prefix=f"{minio_config.minio_img_dir[1:]}/{stem}/",
+                                             prefix=f"{minio_config.minio_img_dir.strip('/')}/{stem}/",
                                              recursive=True)
     # 因为obj里面会有元数据，DeleteObject它只看对象名，别的不管
     delete_obj_list = [DeleteObject(obj.object_name) for obj in img_obj_list]
@@ -263,13 +262,13 @@ def step_4_upload_and_replace_images(targets, summaries, stem, md_content):
             minio_client.fput_object(
                 bucket_name=minio_config.bucket_name,
                 # 桶名后的都叫对象 xx.png  xx/xxx/x.jpg，没有的文件夹会自动创建
-                object_name=f"{minio_config.minio_img_dir}/{stem}/{image_file}",
+                object_name=document_image_object_name(stem, image_file),
                 file_path=image_path,
                 content_type="image/jpeg"
             )
             # 上传完毕后记录
             # 图片地址：协议+端点+桶名+对象名
-            images_url[image_file] = f"http://{minio_config.endpoint}/{minio_config.bucket_name}/{minio_config.minio_img_dir[1:]}/{stem}/{image_file}"
+            images_url[image_file] = document_image_url(stem, image_file)
             logger.info(f"图片上传成功: {image_file} -> {images_url[image_file]}")
         except Exception as e:
             logger.error(f"图片上传失败: {image_file}, 错误: {e}")
@@ -283,12 +282,14 @@ def step_4_upload_and_replace_images(targets, summaries, stem, md_content):
     logger.info(f"图片处理汇总结果:{image_infos}")
 
     if image_infos:
-        # ![summary](url)，利用正则替换
-        for image_file, (summary, url) in image_infos.items():
-            # 构建正则表达式，匹配 ![任意内容](任意内容/图片名任意后缀)
-            pattern = re.compile(r"!\[.*?]\(.*?" + re.escape(image_file) + r".*?\)")
-            # 替换为 ![summary](url)
-            md_content = pattern.sub(f"![{summary}]({url})", md_content)
+        replacements, descriptions = {}, {}
+        for ref in image_references(md_content):
+            image_file = Path(unquote(urlsplit(ref.url).path)).name
+            if image_file in image_infos:
+                summary, url = image_infos[image_file]
+                replacements[ref.url] = url
+                descriptions[ref.url] = summary
+        md_content = replace_image_references(md_content, replacements, descriptions)
         logger.info("完成替换，新内容为{}".format(md_content))
 
     return md_content
@@ -327,33 +328,34 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
     logger.info(f">>> {function_name} 开始执行; 当前状态为{state}")
     add_running_task(state["task_id"], function_name)
 
-    # 1.校验并且获取本次操作的数据
-    md_content, md_path_obj, images_dir_obj = step_1_get_content(state)
+    try:
+        # 1.校验并且获取本次操作的数据
+        md_content, md_path_obj, images_dir_obj = step_1_get_content(state)
 
-    # 如果没有图片文件夹,直接返回state
-    if not images_dir_obj.exists():
-        logger.info(f"图片文件夹不存在: {images_dir_obj}, 跳过图片处理步骤")
+        # 如果没有图片文件夹,直接返回state
+        if not images_dir_obj.exists():
+            logger.info(f"图片文件夹不存在: {images_dir_obj}, 跳过图片处理步骤")
+            return state
+
+        # 2.识别md用过的图片，上文下文各100
+        targets = step_2_scan_images(md_content, images_dir_obj)
+
+        # 3.进行图片总结和处理(视觉模型)
+        summaries = step_3_generate_img_summaries(targets, md_path_obj.stem)
+
+        # 4. 上传到minio同时替换md图片 描述+url
+        new_md_content = step_4_upload_and_replace_images(targets, summaries, md_path_obj.stem, md_content)
+
+        # 5. md内容替换和备份
+        new_md_file_path = step_5_replace_md_and_save(new_md_content, md_path_obj)
+        # 更新地址内容
+        state["md_path"] = new_md_file_path
+        state["md_content"] = new_md_content
         return state
-    
-    # 2.识别md用过的图片，上文下文各100
-    targets = step_2_scan_images(md_content, images_dir_obj)
-
-    # 3.进行图片总结和处理(视觉模型)
-    summaries = step_3_generate_img_summaries(targets, md_path_obj.stem)
-
-    # 4. 上传到minio同时替换md图片 描述+url
-    new_md_content = step_4_upload_and_replace_images(targets, summaries, md_path_obj.stem, md_content)
-
-    # 5. md内容替换和备份
-    new_md_file_path = step_5_replace_md_and_save(new_md_content, md_path_obj)
-    # 更新地址内容
-    state["md_path"] = new_md_file_path
-    state["md_content"] = new_md_content
-
-    logger.info(f">>> {function_name} 执行结束; 当前状态为{state}")
-    add_done_task(state["task_id"], function_name)
-
-    return state
+    finally:
+        # 跳过或异常也要结束节点进度；异常继续交给上层标记任务失败。
+        logger.info(f">>> {function_name} 执行结束; 当前状态为{state}")
+        add_done_task(state["task_id"], function_name)
 
 
 if __name__ == "__main__":

@@ -78,6 +78,7 @@ def fetch_chunks_by_chunk_ids(
         output_fields=None,
         batch_size: int = 100,
         timeout: float = 5.0,
+        on_error=None,
 ):
     """
     通过chunk_id主键批量查询Milvus中的切片数据
@@ -89,6 +90,7 @@ def fetch_chunks_by_chunk_ids(
     :param output_fields: 需要返回的字段列表，默认返回核心切片字段
     :param batch_size: 分批查询大小，避免单次查询数据量过大，默认100
     :param timeout: 每次 get/query 请求的超时秒数
+    :param on_error: 可选回调 (exception, batch_ids)，仅在一个批次的所有查询方式均失败时调用
     :return: List[dict]，按输入 ID 顺序返回的实体；缺失或查询失败的批次跳过
     """
     # 前置校验：客户端/集合名无效直接返回空
@@ -139,6 +141,8 @@ def fetch_chunks_by_chunk_ids(
                 results.extend(q)
         except Exception as e:
             logger.error(f"Milvus query方法批量查询chunk_id失败：{str(e)}", exc_info=True)
+            if on_error is not None:
+                on_error(e, batch)
 
     # 数据库不保证按 ids 的传入顺序返回，因此不能直接把 results 交给 RRF。
     # 例如请求 [103, 101]，即使数据库返回 [101, 103]，这里仍恢复成 [103, 101]。
